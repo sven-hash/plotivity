@@ -152,30 +152,47 @@ L.heatLines = function (tracks, options) { return new L.HeatLines(tracks, option
 
 
 class HeatToggle(folium.MacroElement):
-    """Show route layers when the heatmap overlay is unchecked, hide them when it's checked."""
+    """Heatmap checkbox as a mode switch: unchecked -> routes + light basemap,
+    checked -> heat + dark basemap."""
 
     _template = Template(
         """
         {% macro script(this, kwargs) %}
         (function () {
             var map = {{ this._parent.get_name() }}, heat = {{ this.heat.get_name() }};
+            var dark = {{ this.dark.get_name() }}, light = {{ this.light.get_name() }};
             var routes = [{% for g in this.groups %}{{ g.get_name() }},{% endfor %}];
+            function swapBase(from, to) {
+                if (map.hasLayer(from)) { map.removeLayer(from); map.addLayer(to); }
+            }
+            // setTimeout: run after the layer control has finished processing the click,
+            // otherwise it removes the layers we just added (it walks every unchecked box).
             map.on('overlayremove', function (e) {
-                if (e.layer === heat) routes.forEach(function (l) { map.addLayer(l); });
+                if (e.layer !== heat) return;
+                setTimeout(function () {
+                    routes.forEach(function (l) { map.addLayer(l); });
+                    swapBase(dark, light);
+                }, 0);
             });
             map.on('overlayadd', function (e) {
-                if (e.layer === heat) routes.forEach(function (l) { map.removeLayer(l); });
+                if (e.layer !== heat) return;
+                setTimeout(function () {
+                    routes.forEach(function (l) { map.removeLayer(l); });
+                    swapBase(light, dark);
+                }, 0);
             });
         })();
         {% endmacro %}
         """
     )
 
-    def __init__(self, heat, groups):
+    def __init__(self, heat, groups, dark, light):
         super().__init__()
         self._name = "HeatToggle"
         self.heat = heat
         self.groups = groups
+        self.dark = dark
+        self.light = light
 
 
 class HeatLines(folium.map.Layer):
@@ -569,8 +586,10 @@ def build_map(runs: list[dict], out: Path, line_weight: float, opacity: float, h
     # Esri tiles: OpenStreetMap's servers reject requests without a Referer, which
     # is what a browser sends when opening a local file:// page (403 "Access blocked").
     m = folium.Map(tiles=None, prefer_canvas=True, control_scale=True, zoom_control="bottomright")
-    folium.TileLayer(DARK_TILES, attr=ESRI_ATTR, name="Dark", max_native_zoom=16, max_zoom=19, show=heatmap).add_to(m)
-    folium.TileLayer("Esri.WorldGrayCanvas", name="Light", max_native_zoom=16, max_zoom=19, show=not heatmap).add_to(m)
+    dark = folium.TileLayer(DARK_TILES, attr=ESRI_ATTR, name="Dark", max_native_zoom=16, max_zoom=19, show=heatmap)
+    dark.add_to(m)
+    light = folium.TileLayer("Esri.WorldGrayCanvas", name="Light", max_native_zoom=16, max_zoom=19, show=not heatmap)
+    light.add_to(m)
     folium.TileLayer("Esri.WorldStreetMap", name="Streets", max_zoom=19, show=False).add_to(m)
     folium.TileLayer("Esri.WorldImagery", name="Satellite", max_zoom=19, show=False).add_to(m)
 
@@ -617,7 +636,7 @@ def build_map(runs: list[dict], out: Path, line_weight: float, opacity: float, h
     folium.LayerControl(collapsed=False).add_to(m)
     if heat is not None:
         # Heatmap checkbox acts as a mode switch: off -> show all route layers, on -> hide them.
-        HeatToggle(heat, year_groups).add_to(m)
+        HeatToggle(heat, year_groups, dark, light).add_to(m)
     m.fit_bounds(core_bounds)
 
     total_km = sum(a.get("distance", 0) for a, _ in tracks) / 1000
