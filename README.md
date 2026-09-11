@@ -7,11 +7,14 @@ by default; Strava (API or bulk export) is also supported.
 
 `runs_map.html` is a standalone interactive map:
 
-- every run drawn in one translucent colour, so places you run often show up darker
-- a stats panel (runs, km, hours) with **Home area** / **Everywhere** zoom buttons
-- one toggleable layer per year, each labelled with its run count and distance
-- hover a run for name, date and distance; click it for pace, time and a link to the activity
-- light / streets / satellite basemaps
+- **Heatmap** (default): dark basemap, routes glow from dark red (run once) through orange to
+  yellow-white (run many times), crisp at every zoom. Untick "Heatmap" in the layer control to
+  switch to normal mode: every run drawn individually, one toggleable layer per year with its run
+  count and distance. Tick it again to go back.
+- **Stats panel** (runs, km, hours) with **Home area** / **Everywhere** zoom buttons.
+- **Hover** a run for name, date and distance; **click** it for pace, time, elevation gain and a
+  link to the activity on Garmin / Strava.
+- **Basemaps**: dark, light, streets, satellite.
 
 ## Quick start (Garmin Connect)
 
@@ -33,12 +36,22 @@ open runs_map.html
 ## Options
 
 ```
-uv run plot_runs.py --refresh          # re-download everything instead of using the cache
-uv run plot_runs.py --all-sports       # include rides, hikes, etc.
-uv run plot_runs.py --opacity 0.3      # more heatmap-like
-uv run plot_runs.py --weight 3         # thicker lines
+uv run plot_runs.py                    # runs, heatmap, from Garmin (cached if fetched < 3 h ago)
+uv run plot_runs.py --force            # check Garmin for new activities even if fetched recently
+uv run plot_runs.py --refresh          # throw away the cache and re-download everything
+uv run plot_runs.py --sport ride       # run (default) | ride | hike | walk | swim | ski | all
+uv run plot_runs.py --since 2025       # only activities from 2025 on (also 2025-06 or 2025-06-15)
+uv run plot_runs.py --until 2023-12-31 # only activities up to that date
+uv run plot_runs.py --no-heatmap       # routes only, light basemap, smaller file
+uv run plot_runs.py --open             # open the map in your browser when done
+uv run plot_runs.py --weight 3 --opacity 0.3   # route line style in normal mode
 uv run plot_runs.py -o mymap.html
 ```
+
+**Fetch throttling:** the script remembers when it last talked to Garmin (in `garmin_cache.json`).
+If that was less than 3 hours ago it skips the login and listing entirely and builds the map from
+the cache, which takes a second. `--force` overrides this. Each sport is tracked separately, so
+`--sport ride` after a run-only fetch will still go to Garmin.
 
 ## Strava instead of Garmin
 
