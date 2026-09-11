@@ -1,0 +1,17 @@
+# secrets
+.env
+
+# python / uv
+.venv/
+__pycache__/
+*.pyc
+
+# fetched data and generated output
+activities_cache.json
+garmin_cache.json
+runs_map.html
+*.html
+export_*.zip
+
+# os
+.DS_Store
