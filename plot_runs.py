@@ -1,13 +1,13 @@
 """Overlay every run on a single interactive map.
 
-Sources: Strava API (default), Strava bulk export (--export), Garmin Connect (--garmin).
+Sources: Garmin Connect (default), Strava API (--strava), Strava bulk export (--export ZIP).
 
 Garmin auth (in .env):
       GARMIN_EMAIL=...
       GARMIN_PASSWORD=...
   (MFA code is prompted on first run; tokens are cached in ~/.garminconnect)
 
-Strava auth (in .env):
+Strava auth (in .env, only for --strava):
   Option A - short-lived token (expires after 6h):
       STRAVA_ACCESS_TOKEN=...
   Option B - long-lived, auto-refreshing (recommended):
@@ -95,7 +95,7 @@ def fetch_activities(token: str) -> list[dict]:
                     "the app owner to have a paid Strava subscription for API access.\n"
                     "No-subscription alternative: request your data archive at "
                     "https://www.strava.com/athlete/delete_your_account (Request Your Archive), "
-                    "then run:  uv run plot_runs.py --export export_XXXX.zip"
+                    "then run:  uv run plot_runs.py --export export_XXXX.zip  (or use Garmin Connect: uv run plot_runs.py)"
                 )
             if "activity:read_permission" in body:
                 sys.exit("Token lacks activity:read_all scope. Redo the OAuth flow described in README.md.")
@@ -426,11 +426,12 @@ def build_map(runs: list[dict], out: Path, line_weight: float, opacity: float) -
 
 def main() -> None:
     load_dotenv()
-    p = argparse.ArgumentParser(description="Overlay all Strava runs on a map.")
+    p = argparse.ArgumentParser(description="Overlay all your runs (Garmin Connect by default) on a map.")
     p.add_argument("-o", "--output", type=Path, default=Path("runs_map.html"))
-    p.add_argument("--export", type=Path, help="Strava data-archive zip; skips the API entirely")
-    p.add_argument("--garmin", action="store_true", help="Pull activities from Garmin Connect instead of Strava")
-    p.add_argument("--refresh", action="store_true", help="Refetch from Strava instead of using cache")
+    src = p.add_mutually_exclusive_group()
+    src.add_argument("--strava", action="store_true", help="Use the Strava API instead of Garmin Connect (default)")
+    src.add_argument("--export", type=Path, help="Use a Strava data-archive zip (no API needed)")
+    p.add_argument("--refresh", action="store_true", help="Refetch everything instead of using the local cache")
     p.add_argument("--all-sports", action="store_true", help="Include every activity type, not just runs")
     p.add_argument("--weight", type=float, default=2.0, help="Line width")
     p.add_argument("--opacity", type=float, default=0.55, help="Line opacity (lower = heatmap-like)")
@@ -438,14 +439,14 @@ def main() -> None:
 
     if args.export:
         activities = load_export(args.export)
-    elif args.garmin:
-        activities = load_garmin(args.all_sports, args.refresh)
-    else:
+    elif args.strava:
         token = get_access_token()
         activities = load_activities(token, args.refresh)
         for a in activities:
             if a.get("id"):
                 a["url"] = f"https://www.strava.com/activities/{a['id']}"
+    else:
+        activities = load_garmin(args.all_sports, args.refresh)
     if args.all_sports:
         selected = activities
     else:
