@@ -1,7 +1,43 @@
-# strava-plot
+# strava-plot / Run Map
 
 Overlay every run you've recorded onto one interactive map. Pulls from **Garmin Connect**
 by default; Strava (API or bulk export) is also supported.
+
+Two ways to use it: the **Run Map desktop app** (no terminal needed) or the command-line script.
+
+## Run Map app (macOS)
+
+1. Download the DMG from the [Releases](../../releases) page:
+   `RunMap-…-AppleSilicon.dmg` for M-series Macs, `RunMap-…-Intel.dmg` for Intel Macs.
+   (Apple menu → About This Mac shows which you have.)
+2. Open the DMG and drag **Run Map** into **Applications**.
+3. **First launch:** the app is not signed with an Apple developer certificate, so macOS blocks it
+   once. Open it, click **Done** on the warning, then go to **System Settings → Privacy & Security**,
+   scroll down and click **Open Anyway** next to "Run Map". After that it opens normally.
+4. Enter your Garmin Connect email and password and click **Build map**. If Garmin asks for a
+   verification code, type it in the box that appears. The password is not stored; a login session
+   is, so next time you only click Build.
+5. **Open map** shows the map in a window; **Save map as…** exports the HTML to share or open in a
+   browser.
+
+Data lives in `~/Library/Application Support/RunMap` (login session, cached activities, map).
+"Forget saved login and data" in the app removes it.
+
+### Building the app yourself
+
+```sh
+./packaging/build_mac.sh            # both architectures (Intel via Rosetta) -> dist/*.dmg
+./packaging/build_mac.sh arm64      # just one
+```
+
+GitHub Actions (`.github/workflows/build-mac.yml`) builds both DMGs on every push and attaches
+them to a GitHub Release when you push a tag like `v0.2.0`:
+
+```sh
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+## Command-line script
 
 ## What you get
 

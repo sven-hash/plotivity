@@ -15,3 +15,10 @@ export_*.zip
 
 # os
 .DS_Store
+build/
+dist/
+.venv-build-*/
+packaging/icon_1024.png
+
+# app UI is source, not generated output
+!ui.html

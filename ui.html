@@ -1,0 +1,101 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Run Map</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 13px/1.45 -apple-system, system-ui, sans-serif; margin: 0; padding: 20px 22px; color: #111; background: #f5f5f4; }
+  @media (prefers-color-scheme: dark) { body { color: #eee; background: #1e1e1e; } input, select, .log { background: #2a2a2a; color: #eee; border-color: #444; } .card { background: #262626; } }
+  h1 { font-size: 17px; margin: 0 0 2px; }
+  .sub { color: #777; margin: 0 0 16px; }
+  label { display: block; font-weight: 600; margin: 10px 0 4px; }
+  input, select { width: 100%; box-sizing: border-box; padding: 7px 9px; border: 1px solid #ccc; border-radius: 6px; font: inherit; }
+  .row { display: flex; gap: 10px; } .row > div { flex: 1; }
+  .hint { color: #777; font-size: 12px; margin-top: 3px; }
+  .check { display: flex; align-items: center; gap: 8px; margin-top: 12px; font-weight: 500; } .check input { width: auto; }
+  button { font: inherit; padding: 9px 14px; border-radius: 7px; border: 1px solid #ccc; background: #fff; cursor: pointer; }
+  button.primary { background: #eb6834; color: #fff; border-color: #eb6834; font-weight: 600; }
+  button:disabled { opacity: .5; cursor: default; }
+  .actions { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
+  .log { margin-top: 14px; padding: 8px 10px; height: 110px; overflow: auto; border: 1px solid #ddd; border-radius: 6px; font: 11px/1.5 ui-monospace, Menlo, monospace; white-space: pre-wrap; background: #fff; }
+  .card { margin-top: 12px; padding: 12px; border-radius: 8px; background: #fff3ec; border: 1px solid #f2c7b3; }
+  .err { color: #c0271d; font-weight: 600; margin-top: 10px; }
+  a { color: #eb6834; } .small { font-size: 12px; margin-top: 14px; color: #777; }
+  [hidden] { display: none !important; }
+</style></head>
+<body>
+<h1>Run Map</h1>
+<p class="sub">All your Garmin activities on one map.</p>
+
+<form id="f" onsubmit="return false">
+  <label>Garmin Connect email</label>
+  <input id="email" type="email" autocomplete="username" placeholder="you@example.com">
+  <label>Password</label>
+  <input id="password" type="password" autocomplete="current-password">
+  <div class="hint" id="pwhint">Only needed the first time. The password is not stored; a login session is.</div>
+
+  <div class="row">
+    <div><label>Activity type</label>
+      <select id="sport">
+        <option value="run">Runs</option><option value="ride">Rides</option><option value="hike">Hikes</option>
+        <option value="walk">Walks</option><option value="swim">Swims</option><option value="ski">Ski</option><option value="all">Everything</option>
+      </select></div>
+    <div><label>From (optional)</label><input id="since" placeholder="2024 or 2024-06"></div>
+    <div><label>To (optional)</label><input id="until" placeholder="2025-12-31"></div>
+  </div>
+  <label class="check"><input id="heatmap" type="checkbox" checked> Heatmap (dark map, hotter where you go most)</label>
+  <label class="check"><input id="force" type="checkbox"> Check Garmin for new activities even if checked recently</label>
+
+  <div class="actions">
+    <button class="primary" id="build">Build map</button>
+    <button id="open" hidden>Open map</button>
+    <button id="browser" hidden>Open in browser</button>
+    <button id="save" hidden>Save map as…</button>
+  </div>
+</form>
+
+<div class="card" id="mfa" hidden>
+  <b>Garmin sent you a verification code.</b> Check your email or authenticator app.
+  <div class="row" style="margin-top:8px"><div><input id="mfacode" placeholder="123456" inputmode="numeric"></div>
+  <div style="flex:0"><button class="primary" id="mfasend">Continue</button></div></div>
+</div>
+
+<div class="err" id="err" hidden></div>
+<div class="log" id="log"></div>
+<div class="small"><a href="#" id="forget">Forget saved login and data</a> · files in <span id="dir"></span></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const ui = {
+  log(m) { const l = $('log'); l.textContent += m + '\n'; l.scrollTop = l.scrollHeight; },
+  askMfa() { $('mfa').hidden = false; $('mfacode').focus(); },
+  done() { ui.log('Done.'); busy(false); ['open','browser','save'].forEach(i => $(i).hidden = false); $('password').value = ''; refresh(); },
+  fail(m) { $('err').textContent = m; $('err').hidden = false; busy(false); },
+};
+function busy(b) { $('build').disabled = b; $('build').textContent = b ? 'Working…' : 'Build map'; }
+async function refresh() {
+  const st = await pywebview.api.get_state();
+  const s = st.settings || {};
+  if (s.email) $('email').value = s.email;
+  if (s.sport) $('sport').value = s.sport;
+  $('since').value = s.since || ''; $('until').value = s.until || '';
+  if (s.heatmap !== undefined) $('heatmap').checked = !!s.heatmap;
+  $('pwhint').textContent = st.has_session ? 'You are logged in. Leave the password empty unless the login expired.'
+                                           : 'Only needed the first time. The password is not stored; a login session is.';
+  ['open','browser','save'].forEach(i => $(i).hidden = !st.has_map);
+  $('dir').textContent = st.data_dir;
+}
+$('build').onclick = async () => {
+  $('err').hidden = true; $('log').textContent = ''; busy(true);
+  const opts = { email: $('email').value.trim(), password: $('password').value, sport: $('sport').value,
+    since: $('since').value.trim(), until: $('until').value.trim(), heatmap: $('heatmap').checked, force: $('force').checked };
+  const r = await pywebview.api.build(opts);
+  if (!r.ok) ui.fail(r.error);
+};
+$('mfasend').onclick = async () => { await pywebview.api.submit_mfa($('mfacode').value); $('mfa').hidden = true; $('mfacode').value = ''; };
+$('mfacode').addEventListener('keydown', e => { if (e.key === 'Enter') $('mfasend').click(); });
+$('open').onclick = () => pywebview.api.open_map();
+$('browser').onclick = () => pywebview.api.open_in_browser();
+$('save').onclick = async () => { const r = await pywebview.api.save_map_as(); if (r.ok) ui.log('Saved to ' + r.path); };
+$('forget').onclick = async e => { e.preventDefault(); await pywebview.api.forget_login(); $('email').value = ''; ui.log('Saved login and cached data removed.'); refresh(); };
+window.addEventListener('pywebviewready', refresh);
+</script>
+</body></html>

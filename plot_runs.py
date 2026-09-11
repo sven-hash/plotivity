@@ -42,6 +42,30 @@ import requests
 from dotenv import load_dotenv
 
 API = "https://www.strava.com/api/v3"
+class PlotError(Exception):
+    """User-facing error (bad credentials, no data, ...)."""
+
+
+def _default_log(msg: str) -> None:
+    print(msg, file=sys.stderr)
+
+
+LOG = _default_log  # GUI replaces this to show progress
+
+
+def log(msg: str) -> None:
+    LOG(msg)
+
+
+def set_data_dir(d: Path) -> None:
+    """Put caches and Garmin tokens under `d` (the GUI uses ~/Library/Application Support/RunMap)."""
+    global CACHE, GARMIN_CACHE, GARMIN_TOKENS
+    d.mkdir(parents=True, exist_ok=True)
+    CACHE = d / "activities_cache.json"
+    GARMIN_CACHE = d / "garmin_cache.json"
+    GARMIN_TOKENS = str(d / "garmin_tokens")
+
+
 # lowercase substrings matched against Strava sport_type / Garmin typeKey
 SPORTS = {
     "run": ["run"],
@@ -223,7 +247,7 @@ def get_access_token() -> str:
     client_secret = os.getenv("STRAVA_CLIENT_SECRET")
     refresh_token = os.getenv("STRAVA_REFRESH_TOKEN")
     if not all([client_id, client_secret, refresh_token]):
-        sys.exit(
+        raise PlotError(
             "Missing credentials. Set STRAVA_ACCESS_TOKEN, or "
             "STRAVA_CLIENT_ID + STRAVA_CLIENT_SECRET + STRAVA_REFRESH_TOKEN in .env"
         )
@@ -254,13 +278,13 @@ def fetch_activities(token: str) -> list[dict]:
             timeout=60,
         )
         if r.status_code == 429:
-            print("Rate limited by Strava, sleeping 60s...", file=sys.stderr)
+            log("Rate limited by Strava, sleeping 60s...")
             time.sleep(60)
             continue
         if r.status_code == 403:
             body = r.text
             if '"Inactive"' in body:
-                sys.exit(
+                raise PlotError(
                     "Strava says your API application is Inactive. Since mid-2026 Strava requires "
                     "the app owner to have a paid Strava subscription for API access.\n"
                     "No-subscription alternative: request your data archive at "
@@ -268,21 +292,21 @@ def fetch_activities(token: str) -> list[dict]:
                     "then run:  uv run plot_runs.py --export export_XXXX.zip  (or use Garmin Connect: uv run plot_runs.py)"
                 )
             if "activity:read_permission" in body:
-                sys.exit("Token lacks activity:read_all scope. Redo the OAuth flow described in README.md.")
-            sys.exit(f"403 Forbidden from Strava: {body}")
+                raise PlotError("Token lacks activity:read_all scope. Redo the OAuth flow described in README.md.")
+            raise PlotError(f"403 Forbidden from Strava: {body}")
         r.raise_for_status()
         batch = r.json()
         if not batch:
             break
         activities.extend(batch)
-        print(f"Fetched page {page} ({len(activities)} activities so far)", file=sys.stderr)
+        log(f"Fetched page {page} ({len(activities)} activities so far)")
         page += 1
     return activities
 
 
 def load_activities(token: str, refresh: bool) -> list[dict]:
     if CACHE.exists() and not refresh:
-        print(f"Using cached activities from {CACHE} (pass --refresh to refetch)", file=sys.stderr)
+        log(f"Using cached activities from {CACHE} (pass --refresh to refetch)")
         return json.loads(CACHE.read_text())
     activities = fetch_activities(token)
     CACHE.write_text(json.dumps(activities))
@@ -340,7 +364,7 @@ def load_export(zip_path: Path) -> list[dict]:
     with zipfile.ZipFile(zip_path) as z:
         with z.open("activities.csv") as f:
             rows = list(csv.DictReader(io.TextIOWrapper(f, encoding="utf-8")))
-        print(f"{len(rows)} activities in export", file=sys.stderr)
+        log(f"{len(rows)} activities in export")
         for row in rows:
             fname = row.get("Filename") or ""
             if not fname:
@@ -362,7 +386,7 @@ def load_export(zip_path: Path) -> list[dict]:
                 else:
                     continue
             except Exception as e:  # noqa: BLE001
-                print(f"Skipping {fname}: {e}", file=sys.stderr)
+                log(f"Skipping {fname}: {e}")
                 continue
             if not pts:
                 continue
@@ -420,7 +444,8 @@ def _write_garmin_cache(cache: dict[str, dict], fetched_at: datetime | None, spo
     )
 
 
-def load_garmin(sport: str, refresh: bool, force: bool) -> list[dict]:
+def load_garmin(sport: str, refresh: bool, force: bool, email: str | None = None,
+                password: str | None = None, mfa_prompt=None) -> list[dict]:
     cache, fetched_at, sports = _read_garmin_cache()
     if refresh:
         cache, sports = {}, set()
@@ -431,21 +456,27 @@ def load_garmin(sport: str, refresh: bool, force: bool) -> list[dict]:
         age = datetime.now() - fetched_at
         if age < FETCH_MIN_AGE:
             mins = int(age.total_seconds() // 60)
-            print(f"Garmin fetched {mins} min ago, using cache (--force to fetch anyway)", file=sys.stderr)
+            log(f"Garmin checked {mins} min ago, using cached activities (force to check again)")
             result = [e for e in cache.values() if sport_matches(e.get("sport_type", ""), sport)]
-            print(f"{len(result)} cached activities match sport={sport}", file=sys.stderr)
+            log(f"{len(result)} cached activities match sport={sport}")
             return result
 
     from garminconnect import Garmin
 
-    email = os.getenv("GARMIN_EMAIL")
-    password = os.getenv("GARMIN_PASSWORD")
-    if not email or not password:
-        sys.exit("Set GARMIN_EMAIL and GARMIN_PASSWORD in .env")
+    email = email or os.getenv("GARMIN_EMAIL")
+    password = password or os.getenv("GARMIN_PASSWORD")
+    tokens_exist = Path(GARMIN_TOKENS).expanduser().exists()
+    if not tokens_exist and (not email or not password):
+        raise PlotError("Garmin email and password are required for the first login")
 
-    print("Logging into Garmin Connect (tokens cached in ~/.garminconnect)...", file=sys.stderr)
-    client = Garmin(email, password)
-    client.login(GARMIN_TOKENS)
+    log("Logging into Garmin Connect..." + (" (using saved session)" if tokens_exist else ""))
+    from garminconnect import GarminConnectAuthenticationError
+
+    client = Garmin(email, password, prompt_mfa=mfa_prompt)
+    try:
+        client.login(GARMIN_TOKENS)
+    except GarminConnectAuthenticationError as e:
+        raise PlotError(f"Garmin login failed: {e}") from e
 
     # 1. list all activities (newest first, 100 per page)
     listed: list[dict] = []
@@ -455,7 +486,7 @@ def load_garmin(sport: str, refresh: bool, force: bool) -> list[dict]:
         if not batch:
             break
         listed.extend(batch)
-        print(f"Listed {len(listed)} activities...", file=sys.stderr)
+        log(f"Listed {len(listed)} activities...")
         start += len(batch)
     fetched_at = datetime.now()
     sports.add(sport)
@@ -479,7 +510,7 @@ def load_garmin(sport: str, refresh: bool, force: bool) -> list[dict]:
             gpx = client.download_activity(aid, dl_fmt=Garmin.ActivityDownloadFormat.GPX)
             pts = _parse_gpx(gpx)
         except Exception as e:  # noqa: BLE001
-            print(f"Skipping {aid} ({a.get('activityName')}): {e}", file=sys.stderr)
+            log(f"Skipping {aid} ({a.get('activityName')}): {e}")
             continue
         if not pts:
             continue
@@ -499,11 +530,11 @@ def load_garmin(sport: str, refresh: bool, force: bool) -> list[dict]:
         new += 1
         if new % 10 == 0:
             _write_garmin_cache(cache, fetched_at, sports)
-            print(f"Downloaded {new} new tracks...", file=sys.stderr)
+            log(f"Downloaded {new} new tracks...")
         time.sleep(0.3)  # be gentle with Garmin
 
     _write_garmin_cache(cache, fetched_at, sports)
-    print(f"{len(listed)} activities on Garmin, {len(result)} with tracks ({new} newly downloaded)", file=sys.stderr)
+    log(f"{len(listed)} activities on Garmin, {len(result)} with tracks ({new} newly downloaded)")
     return result
 
 def _short_date(d: str) -> str:
@@ -573,7 +604,7 @@ def build_map(runs: list[dict], out: Path, line_weight: float, opacity: float, h
             tracks.append((a, pts))
 
     if not tracks:
-        sys.exit("No runs with GPS data found.")
+        raise PlotError("No runs with GPS data found.")
 
     all_pts = [p for _, pts in tracks for p in pts]
     all_bounds = [
@@ -696,7 +727,13 @@ def main() -> None:
     p.add_argument("--weight", type=float, default=2.0, help="Route line width")
     p.add_argument("--opacity", type=float, default=0.55, help="Route line opacity")
     args = p.parse_args()
+    try:
+        run_cli(args)
+    except PlotError as e:
+        sys.exit(str(e))
 
+
+def run_cli(args) -> None:
     if args.export:
         activities = load_export(args.export)
     elif args.strava:
@@ -718,7 +755,7 @@ def main() -> None:
                 return False
             return (not args.since or d >= args.since) and (not args.until or d <= args.until)
         selected = [a for a in selected if in_range(a)]
-    print(f"{len(activities)} activities total, {len(selected)} selected", file=sys.stderr)
+    log(f"{len(activities)} activities total, {len(selected)} selected")
     build_map(selected, args.output, args.weight, args.opacity, heatmap=not args.no_heatmap, sport=args.sport)
     if args.open:
         webbrowser.open(args.output.resolve().as_uri())
