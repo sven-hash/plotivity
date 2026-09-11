@@ -3,7 +3,6 @@
 <style>
   :root { color-scheme: light dark; }
   body { font: 13px/1.45 -apple-system, system-ui, sans-serif; margin: 0; padding: 20px 22px; color: #111; background: #f5f5f4; }
-  @media (prefers-color-scheme: dark) { body { color: #eee; background: #1e1e1e; } input, select, .log { background: #2a2a2a; color: #eee; border-color: #444; } .card { background: #262626; } }
   h1 { font-size: 17px; margin: 0 0 2px; }
   .sub { color: #777; margin: 0 0 16px; }
   label { display: block; font-weight: 600; margin: 10px 0 4px; }
@@ -15,11 +14,29 @@
   button.primary { background: #eb6834; color: #fff; border-color: #eb6834; font-weight: 600; }
   button:disabled { opacity: .5; cursor: default; }
   .actions { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
-  .log { margin-top: 14px; padding: 8px 10px; height: 110px; overflow: auto; border: 1px solid #ddd; border-radius: 6px; font: 11px/1.5 ui-monospace, Menlo, monospace; white-space: pre-wrap; background: #fff; }
+  .progress { margin-top: 16px; }
+  .status { font-weight: 500; margin-bottom: 6px; min-height: 1.4em; }
+  progress { width: 100%; height: 8px; appearance: none; -webkit-appearance: none; border: 0; border-radius: 4px; background: #e3e3e0; overflow: hidden; }
+  progress::-webkit-progress-bar { background: #e3e3e0; border-radius: 4px; }
+  progress::-webkit-progress-value { background: #eb6834; border-radius: 4px; transition: width .3s; }
+  details { margin-top: 10px; } summary { cursor: pointer; color: #777; font-size: 12px; }
+  .log { margin-top: 6px; padding: 8px 10px; height: 110px; overflow: auto; border: 1px solid #ddd; border-radius: 6px; font: 11px/1.5 ui-monospace, Menlo, monospace; white-space: pre-wrap; background: #fff; }
   .card { margin-top: 12px; padding: 12px; border-radius: 8px; background: #fff3ec; border: 1px solid #f2c7b3; }
   .err { color: #c0271d; font-weight: 600; margin-top: 10px; }
   a { color: #eb6834; } .small { font-size: 12px; margin-top: 14px; color: #777; }
   [hidden] { display: none !important; }
+
+  /* dark mode last so it wins over the rules above */
+  @media (prefers-color-scheme: dark) {
+    body { color: #eee; background: #1e1e1e; }
+    input, select, .log, button { background: #2a2a2a; color: #eee; border-color: #444; }
+    button:hover { background: #333; }
+    .card { background: #3a2418; border-color: #7a4a30; }
+    .hint, .sub, .small, summary { color: #9a9a9a; }
+    .status { color: #eee; }
+    .err { color: #ff6b61; }
+    progress, progress::-webkit-progress-bar { background: #3a3a3a; }
+  }
 </style></head>
 <body>
 <h1>Run Map</h1>
@@ -58,17 +75,25 @@
   <div style="flex:0"><button class="primary" id="mfasend">Continue</button></div></div>
 </div>
 
+<div class="progress" id="progress" hidden>
+  <div class="status" id="status"></div>
+  <progress id="bar" max="1"></progress>
+</div>
 <div class="err" id="err" hidden></div>
-<div class="log" id="log"></div>
+<details id="details"><summary>Details</summary><div class="log" id="log"></div></details>
 <div class="small"><a href="#" id="forget">Forget saved login and data</a> · files in <span id="dir"></span></div>
 
 <script>
 const $ = id => document.getElementById(id);
 const ui = {
   log(m) { const l = $('log'); l.textContent += m + '\n'; l.scrollTop = l.scrollHeight; },
-  askMfa() { $('mfa').hidden = false; $('mfacode').focus(); },
-  done() { ui.log('Done.'); busy(false); ['open','browser','save'].forEach(i => $(i).hidden = false); $('password').value = ''; refresh(); },
-  fail(m) { $('err').textContent = m; $('err').hidden = false; busy(false); },
+  progress(frac, label) {
+    $('progress').hidden = false; $('status').textContent = label;
+    if (frac === null || frac === undefined) $('bar').removeAttribute('value'); else $('bar').value = frac;
+  },
+  askMfa() { $('mfa').hidden = false; $('mfacode').focus(); ui.progress(null, 'Waiting for verification code…'); },
+  done(summary) { ui.log('Done.'); ui.progress(1, 'Done · ' + summary); busy(false); ['open','browser','save'].forEach(i => $(i).hidden = false); $('password').value = ''; refresh(); },
+  fail(m) { $('err').textContent = m; $('err').hidden = false; $('progress').hidden = true; $('details').open = true; busy(false); },
 };
 function busy(b) { $('build').disabled = b; $('build').textContent = b ? 'Working…' : 'Build map'; }
 async function refresh() {
@@ -84,7 +109,7 @@ async function refresh() {
   $('dir').textContent = st.data_dir;
 }
 $('build').onclick = async () => {
-  $('err').hidden = true; $('log').textContent = ''; busy(true);
+  $('err').hidden = true; $('log').textContent = ''; busy(true); ui.progress(null, 'Starting…');
   const opts = { email: $('email').value.trim(), password: $('password').value, sport: $('sport').value,
     since: $('since').value.trim(), until: $('until').value.trim(), heatmap: $('heatmap').checked, force: $('force').checked };
   const r = await pywebview.api.build(opts);

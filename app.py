@@ -42,6 +42,9 @@ class Api:
     def _log(self, msg: str) -> None:
         self._js(f"ui.log({json.dumps(msg)})")
 
+    def _progress(self, fraction: float | None, label: str) -> None:
+        self._js(f"ui.progress({json.dumps(fraction)}, {json.dumps(label)})")
+
     def _has_session(self) -> bool:
         return Path(plot_runs.GARMIN_TOKENS).exists()
 
@@ -102,6 +105,7 @@ class Api:
 
     def _build(self, opts: dict) -> None:
         plot_runs.LOG = self._log
+        plot_runs.PROGRESS = self._progress
         try:
             settings = {k: opts.get(k) for k in ("email", "sport", "since", "until", "heatmap")}
             SETTINGS_FILE.write_text(json.dumps(settings))  # never the password
@@ -125,7 +129,7 @@ class Api:
                 selected = [a for a in selected if in_range(a)]
             self._log(f"{len(selected)} activities selected")
             plot_runs.build_map(selected, MAP_FILE, 2.0, 0.55, heatmap=bool(opts.get("heatmap", True)), sport=sport)
-            self._js("ui.done()")
+            self._js(f"ui.done({json.dumps(f'{len(selected)} activities on the map')})")
         except plot_runs.PlotError as e:
             self._js(f"ui.fail({json.dumps(str(e))})")
         except Exception as e:  # noqa: BLE001

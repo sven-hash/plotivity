@@ -57,6 +57,13 @@ def log(msg: str) -> None:
     LOG(msg)
 
 
+PROGRESS = lambda fraction, label: None  # noqa: E731  GUI replaces this; fraction None = indeterminate
+
+
+def progress(fraction: float | None, label: str) -> None:
+    PROGRESS(fraction, label)
+
+
 def set_data_dir(d: Path) -> None:
     """Put caches and Garmin tokens under `d` (the GUI uses ~/Library/Application Support/RunMap)."""
     global CACHE, GARMIN_CACHE, GARMIN_TOKENS
@@ -470,6 +477,7 @@ def load_garmin(sport: str, refresh: bool, force: bool, email: str | None = None
         raise PlotError("Garmin email and password are required for the first login")
 
     log("Logging into Garmin Connect..." + (" (using saved session)" if tokens_exist else ""))
+    progress(None, "Logging into Garmin Connect…")
     from garminconnect import GarminConnectAuthenticationError
 
     client = Garmin(email, password, prompt_mfa=mfa_prompt)
@@ -487,6 +495,7 @@ def load_garmin(sport: str, refresh: bool, force: bool, email: str | None = None
             break
         listed.extend(batch)
         log(f"Listed {len(listed)} activities...")
+        progress(None, f"Listing activities… {len(listed)}")
         start += len(batch)
     fetched_at = datetime.now()
     sports.add(sport)
@@ -494,6 +503,12 @@ def load_garmin(sport: str, refresh: bool, force: bool, email: str | None = None
     # 2. download GPX for the ones we want and don't have yet
     result: list[dict] = []
     new = 0
+    todo = sum(
+        1 for a in listed
+        if sport_matches((a.get("activityType") or {}).get("typeKey", ""), sport)
+        and a.get("hasPolyline", True) and str(a["activityId"]) not in cache
+    )
+    progress(0.0 if todo else None, f"Downloading {todo} new tracks…" if todo else "No new activities")
     for a in listed:
         aid = str(a["activityId"])
         type_key = (a.get("activityType") or {}).get("typeKey", "")
@@ -528,6 +543,7 @@ def load_garmin(sport: str, refresh: bool, force: bool, email: str | None = None
         cache[aid] = entry
         result.append(entry)
         new += 1
+        progress(new / todo, f"Downloading tracks… {new}/{todo}")
         if new % 10 == 0:
             _write_garmin_cache(cache, fetched_at, sports)
             log(f"Downloaded {new} new tracks...")
@@ -594,6 +610,7 @@ def _core_bounds(tracks: list[tuple[dict, list]]) -> list[tuple[float, float]]:
 
 
 def build_map(runs: list[dict], out: Path, line_weight: float, opacity: float, heatmap: bool = True, sport: str = "run") -> None:
+    progress(None, "Building map…")
     tracks = []
     for a in runs:
         encoded = (a.get("map") or {}).get("summary_polyline")
