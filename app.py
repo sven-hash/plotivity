@@ -18,6 +18,8 @@ APP_NAME = "Run Map"
 DATA_DIR = Path.home() / "Library" / "Application Support" / "RunMap"
 SETTINGS_FILE = DATA_DIR / "settings.json"
 MAP_FILE = DATA_DIR / "runs_map.html"
+IMPORTS_DIR = DATA_DIR / "imports"
+FILE_TYPES = ("Activity files (*.fit;*.gpx;*.tcx;*.gz)",)
 
 
 def resource(name: str) -> Path:
@@ -60,22 +62,57 @@ class Api:
             "settings": settings,
             "has_session": self._has_session(),
             "has_map": MAP_FILE.exists(),
+            "imports": len(plot_runs.find_track_files([IMPORTS_DIR])) if IMPORTS_DIR.exists() else 0,
             "data_dir": str(DATA_DIR),
         }
 
-    def build(self, opts: dict) -> dict:
+    def _start(self, job, *args) -> dict:
         if self._busy:
             return {"ok": False, "error": "Already running"}
         self._busy = True
-        threading.Thread(target=self._build, args=(opts,), daemon=True).start()
+        threading.Thread(target=self._run, args=(job, *args), daemon=True).start()
         return {"ok": True}
+
+    def build(self, opts: dict) -> dict:
+        return self._start(self._build, opts)
+
+    # ---- import / export / upload ----
+    def import_files(self) -> dict:
+        picked = self.window.create_file_dialog(webview.OPEN_DIALOG, allow_multiple=True, file_types=FILE_TYPES)
+        return self._copy_imports([Path(p) for p in (picked or [])])
+
+    def import_folder(self) -> dict:
+        picked = self.window.create_file_dialog(webview.FOLDER_DIALOG)
+        return self._copy_imports([Path(p) for p in (picked or [])])
+
+    def _copy_imports(self, paths: list[Path]) -> dict:
+        files = plot_runs.find_track_files(paths)
+        IMPORTS_DIR.mkdir(parents=True, exist_ok=True)
+        for f in files:
+            shutil.copyfile(f, IMPORTS_DIR / f.name)
+        return {"ok": True, "added": len(files), "total": self.get_state()["imports"]}
+
+    def clear_imports(self) -> None:
+        shutil.rmtree(IMPORTS_DIR, ignore_errors=True)
+
+    def export(self, opts: dict, fmt: str) -> dict:
+        picked = self.window.create_file_dialog(webview.FOLDER_DIALOG)
+        if not picked:
+            return {"ok": False, "error": "cancelled"}
+        return self._start(self._export, opts, fmt, Path(picked[0]))
+
+    def upload(self, opts: dict) -> dict:
+        picked = self.window.create_file_dialog(webview.OPEN_DIALOG, allow_multiple=True, file_types=FILE_TYPES)
+        if not picked:
+            return {"ok": False, "error": "cancelled"}
+        return self._start(self._upload, opts, [Path(p) for p in picked])
 
     def submit_mfa(self, code: str) -> None:
         self._mfa_code = code.strip()
         self._mfa_event.set()
 
     def open_map(self) -> None:
-        webview.create_window(f"{APP_NAME} · map", url=str(MAP_FILE), width=1200, height=800)
+        webview.create_window(f"{APP_NAME} · map", url=MAP_FILE.as_uri(), width=1200, height=800)
 
     def open_in_browser(self) -> None:
         webbrowser.open(MAP_FILE.as_uri())
@@ -103,33 +140,12 @@ class Api:
         self._mfa_event.wait()
         return self._mfa_code or ""
 
-    def _build(self, opts: dict) -> None:
+    def _run(self, job, *args) -> None:
         plot_runs.LOG = self._log
         plot_runs.PROGRESS = self._progress
         try:
-            settings = {k: opts.get(k) for k in ("email", "sport", "since", "until", "heatmap")}
-            SETTINGS_FILE.write_text(json.dumps(settings))  # never the password
-
-            sport = opts.get("sport") or "run"
-            activities = plot_runs.load_garmin(
-                sport,
-                refresh=bool(opts.get("refresh")),
-                force=bool(opts.get("force")),
-                email=opts.get("email") or None,
-                password=opts.get("password") or None,
-                mfa_prompt=self._ask_mfa,
-            )
-            selected = [a for a in activities if plot_runs.sport_matches(a.get("sport_type", ""), sport)]
-            since = plot_runs._parse_cli_date(opts["since"]) if opts.get("since") else None
-            until = plot_runs._parse_cli_date(opts["until"]) if opts.get("until") else None
-            if since or until:
-                def in_range(a: dict) -> bool:
-                    d = plot_runs._parse_date(a.get("start_date_local", ""))
-                    return d is not None and (not since or d >= since) and (not until or d <= until)
-                selected = [a for a in selected if in_range(a)]
-            self._log(f"{len(selected)} activities selected")
-            plot_runs.build_map(selected, MAP_FILE, 2.0, 0.55, heatmap=bool(opts.get("heatmap", True)), sport=sport)
-            self._js(f"ui.done({json.dumps(f'{len(selected)} activities on the map')})")
+            summary, show_map = job(*args)
+            self._js(f"ui.done({json.dumps(summary)}, {json.dumps(show_map)})")
         except plot_runs.PlotError as e:
             self._js(f"ui.fail({json.dumps(str(e))})")
         except Exception as e:  # noqa: BLE001
@@ -137,6 +153,50 @@ class Api:
             self._js(f"ui.fail({json.dumps(f'{type(e).__name__}: {e}')})")
         finally:
             self._busy = False
+
+    def _login(self, opts: dict):
+        return plot_runs.garmin_login(opts.get("email") or None, opts.get("password") or None, self._ask_mfa)
+
+    def _export(self, opts: dict, fmt: str, dest: Path) -> tuple[str, bool]:
+        n = plot_runs.export_garmin(dest, fmt, self._login(opts))
+        return f"Exported {n['exported']} {fmt.upper()} files to {dest.name} ({n['skipped']} already there, {n['failed']} failed)", False
+
+    def _upload(self, opts: dict, files: list[Path]) -> tuple[str, bool]:
+        n = plot_runs.upload_garmin(files, self._login(opts))
+        return f"Uploaded {n['uploaded']}, {n['duplicate']} duplicates, {n['failed']} failed", False
+
+    def _build(self, opts: dict) -> tuple[str, bool]:
+        settings = {k: opts.get(k) for k in ("email", "sport", "since", "until", "heatmap")}
+        SETTINGS_FILE.write_text(json.dumps(settings))  # never the password
+
+        sport = opts.get("sport") or "run"
+        imported = plot_runs.find_track_files([IMPORTS_DIR]) if IMPORTS_DIR.exists() else []
+        use_garmin = bool(opts.get("email")) or self._has_session()
+        if not use_garmin and not imported:
+            raise plot_runs.PlotError("Enter your Garmin login, or import activity files first")
+        activities: list[dict] = []
+        if use_garmin:
+            activities += plot_runs.load_garmin(
+                sport,
+                refresh=bool(opts.get("refresh")),
+                force=bool(opts.get("force")),
+                email=opts.get("email") or None,
+                password=opts.get("password") or None,
+                mfa_prompt=self._ask_mfa,
+            )
+        if imported:
+            activities += plot_runs.load_files([IMPORTS_DIR])
+        selected = [a for a in activities if plot_runs.sport_matches(a.get("sport_type", ""), sport)]
+        since = plot_runs._parse_cli_date(opts["since"]) if opts.get("since") else None
+        until = plot_runs._parse_cli_date(opts["until"]) if opts.get("until") else None
+        if since or until:
+            def in_range(a: dict) -> bool:
+                d = plot_runs._parse_date(a.get("start_date_local", ""))
+                return d is not None and (not since or d >= since) and (not until or d <= until)
+            selected = [a for a in selected if in_range(a)]
+        self._log(f"{len(selected)} activities selected")
+        plot_runs.build_map(selected, MAP_FILE, 2.0, 0.55, heatmap=bool(opts.get("heatmap", True)), sport=sport)
+        return f"{len(selected)} activities on the map", True
 
 
 def main() -> None:

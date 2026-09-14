@@ -75,6 +75,20 @@
   <div style="flex:0"><button class="primary" id="mfasend">Continue</button></div></div>
 </div>
 
+<details id="tools">
+  <summary>Import, export &amp; upload</summary>
+  <div class="hint" style="margin:6px 0 8px">Import activity files (.fit/.gpx/.tcx) to add them to the map, e.g. from a watch's GARMIN/Activity folder.
+    Export downloads your Garmin activities as files. Upload sends files to Garmin Connect.</div>
+  <div class="actions" style="margin-top:0">
+    <button id="impfiles">Import files…</button>
+    <button id="impfolder">Import folder…</button>
+    <button id="expfit">Export FIT…</button>
+    <button id="expgpx">Export GPX…</button>
+    <button id="upload">Upload to Garmin…</button>
+  </div>
+  <div class="hint" id="impinfo" style="margin-top:8px"></div>
+</details>
+
 <div class="progress" id="progress" hidden>
   <div class="status" id="status"></div>
   <progress id="bar" max="1"></progress>
@@ -92,7 +106,7 @@ const ui = {
     if (frac === null || frac === undefined) $('bar').removeAttribute('value'); else $('bar').value = frac;
   },
   askMfa() { $('mfa').hidden = false; $('mfacode').focus(); ui.progress(null, 'Waiting for verification code…'); },
-  done(summary) { ui.log('Done.'); ui.progress(1, 'Done · ' + summary); busy(false); ['open','browser','save'].forEach(i => $(i).hidden = false); $('password').value = ''; refresh(); },
+  done(summary, showMap) { ui.log('Done.'); ui.progress(1, 'Done · ' + summary); busy(false); if (showMap) ['open','browser','save'].forEach(i => $(i).hidden = false); $('password').value = ''; refresh(); },
   fail(m) { $('err').textContent = m; $('err').hidden = false; $('progress').hidden = true; $('details').open = true; busy(false); },
 };
 function busy(b) { $('build').disabled = b; $('build').textContent = b ? 'Working…' : 'Build map'; }
@@ -107,12 +121,22 @@ async function refresh() {
                                            : 'Only needed the first time. The password is not stored; a login session is.';
   ['open','browser','save'].forEach(i => $(i).hidden = !st.has_map);
   $('dir').textContent = st.data_dir;
+  $('impinfo').innerHTML = st.imports ? st.imports + ' imported file(s) will be included in the map · <a href="#" id="clearimp">remove them</a>' : 'No imported files.';
+  const c = $('clearimp'); if (c) c.onclick = async e => { e.preventDefault(); await pywebview.api.clear_imports(); refresh(); };
 }
-$('build').onclick = async () => {
-  $('err').hidden = true; $('log').textContent = ''; busy(true); ui.progress(null, 'Starting…');
-  const opts = { email: $('email').value.trim(), password: $('password').value, sport: $('sport').value,
+function opts() {
+  return { email: $('email').value.trim(), password: $('password').value, sport: $('sport').value,
     since: $('since').value.trim(), until: $('until').value.trim(), heatmap: $('heatmap').checked, force: $('force').checked };
-  const r = await pywebview.api.build(opts);
+}
+function startJob(label) { $('err').hidden = true; $('log').textContent = ''; busy(true); ui.progress(null, label); }
+$('impfiles').onclick = async () => { const r = await pywebview.api.import_files(); if (r.added) ui.log(r.added + ' file(s) imported'); refresh(); };
+$('impfolder').onclick = async () => { const r = await pywebview.api.import_folder(); if (r.added) ui.log(r.added + ' file(s) imported'); refresh(); };
+$('expfit').onclick = async () => { const r = await pywebview.api.export(opts(), 'fit'); if (r.ok) startJob('Exporting FIT files…'); else if (r.error !== 'cancelled') ui.fail(r.error); };
+$('expgpx').onclick = async () => { const r = await pywebview.api.export(opts(), 'gpx'); if (r.ok) startJob('Exporting GPX files…'); else if (r.error !== 'cancelled') ui.fail(r.error); };
+$('upload').onclick = async () => { const r = await pywebview.api.upload(opts()); if (r.ok) startJob('Uploading…'); else if (r.error !== 'cancelled') ui.fail(r.error); };
+$('build').onclick = async () => {
+  startJob('Starting…');
+  const r = await pywebview.api.build(opts());
   if (!r.ok) ui.fail(r.error);
 };
 $('mfasend').onclick = async () => { await pywebview.api.submit_mfa($('mfacode').value); $('mfa').hidden = true; $('mfacode').value = ''; };

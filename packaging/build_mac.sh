@@ -27,7 +27,7 @@ for ARCH in "${ARCHES[@]}"; do
     --add-data "$PWD/ui.html:." \
     --collect-data folium --collect-data branca --collect-data xyzservices \
     --collect-all curl_cffi --collect-data ua_generator --collect-data certifi \
-    --hidden-import garminconnect --hidden-import fitdecode \
+    --hidden-import garminconnect --hidden-import fitdecode --hidden-import workouts \
     --workpath "build/pyi-$ARCH" --distpath "dist/$ARCH" --specpath "build" \
     app.py
 

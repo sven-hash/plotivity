@@ -24,6 +24,7 @@ import html
 import gzip
 import io
 import json
+import math
 import os
 import re
 import statistics
@@ -66,11 +67,16 @@ def progress(fraction: float | None, label: str) -> None:
 
 def set_data_dir(d: Path) -> None:
     """Put caches and Garmin tokens under `d` (the GUI uses ~/Library/Application Support/RunMap)."""
-    global CACHE, GARMIN_CACHE, GARMIN_TOKENS
+    global CACHE, GARMIN_CACHE, GARMIN_TOKENS, TRACKS_DIR
     d.mkdir(parents=True, exist_ok=True)
     CACHE = d / "activities_cache.json"
     GARMIN_CACHE = d / "garmin_cache.json"
     GARMIN_TOKENS = str(d / "garmin_tokens")
+    TRACKS_DIR = d / "tracks"  # raw GPX per Garmin activity, kept for export
+
+
+TRACKS_DIR: Path | None = None
+TRACK_EXTS = (".fit", ".gpx", ".tcx", ".fit.gz", ".gpx.gz", ".tcx.gz")
 
 
 # lowercase substrings matched against Strava sport_type / Garmin typeKey
@@ -322,44 +328,190 @@ def load_activities(token: str, refresh: bool) -> list[dict]:
 
 # ---------- Offline mode: Strava bulk export (no API / subscription needed) ----------
 
-def _parse_gpx(data: bytes) -> list[tuple[float, float]]:
+def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    r = 6371000.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp, dl = p2 - p1, math.radians(lon2 - lon1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * r * math.asin(math.sqrt(a))
+
+
+def _track_length_m(pts: list[tuple[float, float]]) -> float:
+    return sum(_haversine_m(*a, *b) for a, b in zip(pts, pts[1:]))
+
+
+def _local(dt: datetime | None) -> str:
+    if dt is None:
+        return ""
+    if dt.tzinfo is not None:
+        dt = dt.astimezone()
+    return dt.replace(tzinfo=None).isoformat(timespec="seconds")
+
+
+def _iso(text: str | None) -> datetime | None:
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _read_gpx(data: bytes) -> tuple[list[tuple[float, float]], dict]:
     root = ET.fromstring(data)
-    pts = []
+    pts, times, eles = [], [], []
+    meta: dict = {}
     for el in root.iter():
-        if el.tag.endswith("trkpt"):
+        tag = el.tag.rsplit("}", 1)[-1]
+        if tag == "trkpt":
             pts.append((float(el.get("lat")), float(el.get("lon"))))
-    return pts
+            t = e = None
+            for c in el:
+                ct = c.tag.rsplit("}", 1)[-1]
+                if ct == "time":
+                    t = _iso(c.text)
+                elif ct == "ele" and c.text:
+                    e = float(c.text)
+            times.append(t)
+            eles.append(e)
+        elif tag == "name" and "name" not in meta and el.text:
+            meta["name"] = el.text.strip()
+        elif tag == "type" and "sport" not in meta and el.text:
+            meta["sport"] = el.text.strip()
+    ts = [t for t in times if t]
+    if ts:
+        meta["start"] = ts[0]
+        meta["moving_time"] = (ts[-1] - ts[0]).total_seconds()
+    es = [e for e in eles if e is not None]
+    if len(es) > 1:
+        meta["elevation_gain"] = sum(max(0.0, b - a) for a, b in zip(es, es[1:]) if b - a > 0.5)
+    return pts, meta
 
 
-def _parse_tcx(data: bytes) -> list[tuple[float, float]]:
+def _read_tcx(data: bytes) -> tuple[list[tuple[float, float]], dict]:
     root = ET.fromstring(data)
     pts = []
+    meta: dict = {}
+    dist = secs = 0.0
     for el in root.iter():
-        if el.tag.endswith("Position"):
+        tag = el.tag.rsplit("}", 1)[-1]
+        if tag == "Activity":
+            meta.setdefault("sport", el.get("Sport", ""))
+        elif tag == "Id" and "start" not in meta:
+            meta["start"] = _iso(el.text)
+        elif tag == "Lap":
+            for c in el:
+                ct = c.tag.rsplit("}", 1)[-1]
+                if ct == "TotalTimeSeconds" and c.text:
+                    secs += float(c.text)
+                elif ct == "DistanceMeters" and c.text:
+                    dist += float(c.text)
+        elif tag == "Position":
             lat = lon = None
             for c in el:
-                if c.tag.endswith("LatitudeDegrees"):
+                ct = c.tag.rsplit("}", 1)[-1]
+                if ct == "LatitudeDegrees":
                     lat = float(c.text)
-                elif c.tag.endswith("LongitudeDegrees"):
+                elif ct == "LongitudeDegrees":
                     lon = float(c.text)
             if lat is not None and lon is not None:
                 pts.append((lat, lon))
-    return pts
+    if dist:
+        meta["distance"] = dist
+    if secs:
+        meta["moving_time"] = secs
+    return pts, meta
 
 
-def _parse_fit(data: bytes) -> list[tuple[float, float]]:
+def _read_fit(data: bytes) -> tuple[list[tuple[float, float]], dict]:
     import fitdecode
 
     pts = []
+    meta: dict = {}
     scale = 180 / 2**31
     with fitdecode.FitReader(io.BytesIO(data)) as fit:
         for frame in fit:
-            if isinstance(frame, fitdecode.FitDataMessage) and frame.name == "record":
+            if not isinstance(frame, fitdecode.FitDataMessage):
+                continue
+            if frame.name == "record":
                 lat = frame.get_value("position_lat", fallback=None)
                 lon = frame.get_value("position_long", fallback=None)
                 if lat is not None and lon is not None:
                     pts.append((lat * scale, lon * scale))
-    return pts
+            elif frame.name == "session" and "start" not in meta:
+                g = lambda k: frame.get_value(k, fallback=None)  # noqa: E731
+                sport, sub = str(g("sport") or ""), str(g("sub_sport") or "")
+                meta["sport"] = sport if sub in ("", "generic", "None") else f"{sport}_{sub}"
+                meta["start"] = g("start_time")
+                meta["distance"] = g("total_distance")
+                meta["moving_time"] = g("total_timer_time") or g("total_elapsed_time")
+                meta["elevation_gain"] = g("total_ascent")
+    return pts, meta
+
+
+def read_track_file(name: str, raw: bytes) -> tuple[list[tuple[float, float]], dict]:
+    """Decode a .fit/.gpx/.tcx (optionally .gz) into (points, metadata)."""
+    lname = name.lower()
+    if lname.endswith(".gz"):
+        raw = gzip.decompress(raw)
+        lname = lname[:-3]
+    if lname.endswith(".gpx"):
+        return _read_gpx(raw)
+    if lname.endswith(".tcx"):
+        return _read_tcx(raw)
+    if lname.endswith(".fit"):
+        return _read_fit(raw)
+    raise ValueError(f"unsupported file type: {name}")
+
+
+def _parse_gpx(data: bytes) -> list[tuple[float, float]]:
+    return _read_gpx(data)[0]
+
+
+def _entry_from_track(name: str, pts: list, meta: dict, url: str = "") -> dict:
+    step = max(1, len(pts) // 300)
+    dist = meta.get("distance") or _track_length_m(pts)
+    return {
+        "name": meta.get("name") or name,
+        "sport_type": (meta.get("sport") or "").lower(),
+        "start_date_local": _local(meta.get("start")),
+        "distance": float(dist or 0),
+        "moving_time": float(meta.get("moving_time") or 0),
+        "elevation_gain": float(meta.get("elevation_gain") or 0),
+        "map": {"summary_polyline": polyline.encode(pts[::step])},
+        "url": url,
+    }
+
+
+def find_track_files(paths: list[Path]) -> list[Path]:
+    files: list[Path] = []
+    for p in paths:
+        if p.is_dir():
+            files += [f for f in p.rglob("*") if f.is_file() and f.name.lower().endswith(TRACK_EXTS)]
+        elif p.is_file():
+            files.append(p)
+    return sorted(set(files))
+
+
+def load_files(paths: list[Path]) -> list[dict]:
+    """Activities from local .fit/.gpx/.tcx files or folders (e.g. GARMIN/Activity on a watch)."""
+    files = find_track_files(paths)
+    log(f"{len(files)} track files found")
+    out: list[dict] = []
+    for i, f in enumerate(files, 1):
+        try:
+            pts, meta = read_track_file(f.name, f.read_bytes())
+        except Exception as e:  # noqa: BLE001
+            log(f"Skipping {f.name}: {e}")
+            continue
+        if not pts:
+            continue
+        if not meta.get("start"):
+            meta["start"] = datetime.fromtimestamp(f.stat().st_mtime)
+        stem = f.name.split(".")[0]
+        out.append(_entry_from_track(stem, pts, meta, url=f.as_uri()))
+        progress(i / len(files), f"Reading files… {i}/{len(files)}")
+    return out
 
 
 def load_export(zip_path: Path) -> list[dict]:
@@ -380,18 +532,8 @@ def load_export(zip_path: Path) -> list[dict]:
                 raw = z.read(fname)
             except KeyError:
                 continue
-            if fname.endswith(".gz"):
-                raw = gzip.decompress(raw)
-                fname = fname[:-3]
             try:
-                if fname.endswith(".gpx"):
-                    pts = _parse_gpx(raw)
-                elif fname.endswith(".tcx"):
-                    pts = _parse_tcx(raw)
-                elif fname.endswith(".fit"):
-                    pts = _parse_fit(raw)
-                else:
-                    continue
+                pts, _meta = read_track_file(fname, raw)
             except Exception as e:  # noqa: BLE001
                 log(f"Skipping {fname}: {e}")
                 continue
@@ -451,6 +593,110 @@ def _write_garmin_cache(cache: dict[str, dict], fetched_at: datetime | None, spo
     )
 
 
+def garmin_login(email: str | None = None, password: str | None = None, mfa_prompt=None):
+    from garminconnect import Garmin, GarminConnectAuthenticationError
+
+    email = email or os.getenv("GARMIN_EMAIL")
+    password = password or os.getenv("GARMIN_PASSWORD")
+    tokens_exist = Path(GARMIN_TOKENS).expanduser().exists()
+    if not tokens_exist and (not email or not password):
+        raise PlotError("Garmin email and password are required for the first login")
+
+    log("Logging into Garmin Connect..." + (" (using saved session)" if tokens_exist else ""))
+    progress(None, "Logging into Garmin Connect…")
+    client = Garmin(email, password, prompt_mfa=mfa_prompt)
+    try:
+        client.login(GARMIN_TOKENS)
+    except GarminConnectAuthenticationError as e:
+        raise PlotError(f"Garmin login failed: {e}") from e
+    return client
+
+
+def _slug(text: str, n: int = 40) -> str:
+    return re.sub(r"[^A-Za-z0-9]+", "-", text).strip("-")[:n] or "activity"
+
+
+def export_garmin(dest: Path, fmt: str, client, ids: list[str] | None = None) -> dict:
+    """Write cached Garmin activities (all, or `ids`) to dest as .fit (original file) or .gpx. Skips existing."""
+    from garminconnect import Garmin
+
+    cache, _, _ = _read_garmin_cache()
+    if not cache:
+        raise PlotError("Nothing to export yet: build the map first so activities are known")
+    dest.mkdir(parents=True, exist_ok=True)
+    ids = sorted(ids or cache, key=lambda k: cache[k].get("start_date_local", ""))
+    n = {"exported": 0, "skipped": 0, "failed": 0, "total": len(ids)}
+    for i, aid in enumerate(ids, 1):
+        e = cache[aid]
+        out = dest / f"{_short_date(e.get('start_date_local', '')) or 'undated'}_{_slug(e.get('name', ''))}_{aid}.{fmt}"
+        if out.exists():
+            n["skipped"] += 1
+            continue
+        try:
+            if fmt == "gpx":
+                local = TRACKS_DIR / f"{aid}.gpx" if TRACKS_DIR else None
+                if local and local.exists():
+                    data = local.read_bytes()
+                else:
+                    data = client.download_activity(aid, dl_fmt=Garmin.ActivityDownloadFormat.GPX)
+                    time.sleep(0.2)
+            else:
+                raw = client.download_activity(aid, dl_fmt=Garmin.ActivityDownloadFormat.ORIGINAL)
+                time.sleep(0.2)
+                with zipfile.ZipFile(io.BytesIO(raw)) as z:
+                    names = z.namelist()
+                    inner = next((x for x in names if x.lower().endswith(".fit")), names[0])
+                    if not inner.lower().endswith(".fit"):  # activity was uploaded as gpx/tcx originally
+                        out = out.with_suffix(Path(inner).suffix.lower())
+                    data = z.read(inner)
+            out.write_bytes(data)
+            n["exported"] += 1
+        except Exception as ex:  # noqa: BLE001
+            n["failed"] += 1
+            log(f"Failed {aid} ({e.get('name')}): {ex}")
+        progress(i / len(ids), f"Exporting {fmt.upper()}… {i}/{len(ids)}")
+    log(f"Export done: {n['exported']} written, {n['skipped']} already there, {n['failed']} failed -> {dest}")
+    return n
+
+
+def upload_garmin(files: list[Path], client) -> dict:
+    """Upload .fit/.gpx/.tcx files to Garmin Connect. Returns counts; logs one line per file."""
+    import workouts
+
+    n = {"uploaded": 0, "duplicate": 0, "failed": 0, "total": len(files)}
+    for i, f in enumerate(files, 1):
+        status = "failed"
+        try:
+            if workouts.is_workout_fit(f):
+                r = workouts.upload_workout_file(f, client)
+                n["uploaded"] += 1
+                log(f"{f.name}: workout '{r['name']}' created ({r['steps']} steps, id {r['id']})")
+                progress(i / len(files), f"Uploading… {i}/{len(files)}")
+                continue
+            resp = client.upload_activity(str(f))
+            code = getattr(resp, "status_code", 202)
+            body = ""
+            try:
+                body = json.dumps(resp.json()) if hasattr(resp, "json") else str(resp)
+            except Exception:  # noqa: BLE001
+                body = str(resp)
+            if code == 409 or "duplicate" in body.lower():
+                status = "duplicate"
+            elif code < 300:
+                status = "uploaded"
+            else:
+                status = f"failed (HTTP {code})"
+        except Exception as ex:  # noqa: BLE001
+            msg = str(ex)
+            status = "duplicate" if "409" in msg or "duplicate" in msg.lower() else f"failed: {msg[:120]}"
+        n["uploaded" if status == "uploaded" else "duplicate" if status == "duplicate" else "failed"] += 1
+        log(f"{f.name}: {status}")
+        progress(i / len(files), f"Uploading… {i}/{len(files)}")
+        time.sleep(0.5)
+    log(f"Upload done: {n['uploaded']} uploaded, {n['duplicate']} duplicates, {n['failed']} failed")
+    return n
+
+
 def load_garmin(sport: str, refresh: bool, force: bool, email: str | None = None,
                 password: str | None = None, mfa_prompt=None) -> list[dict]:
     cache, fetched_at, sports = _read_garmin_cache()
@@ -468,23 +714,8 @@ def load_garmin(sport: str, refresh: bool, force: bool, email: str | None = None
             log(f"{len(result)} cached activities match sport={sport}")
             return result
 
+    client = garmin_login(email, password, mfa_prompt)
     from garminconnect import Garmin
-
-    email = email or os.getenv("GARMIN_EMAIL")
-    password = password or os.getenv("GARMIN_PASSWORD")
-    tokens_exist = Path(GARMIN_TOKENS).expanduser().exists()
-    if not tokens_exist and (not email or not password):
-        raise PlotError("Garmin email and password are required for the first login")
-
-    log("Logging into Garmin Connect..." + (" (using saved session)" if tokens_exist else ""))
-    progress(None, "Logging into Garmin Connect…")
-    from garminconnect import GarminConnectAuthenticationError
-
-    client = Garmin(email, password, prompt_mfa=mfa_prompt)
-    try:
-        client.login(GARMIN_TOKENS)
-    except GarminConnectAuthenticationError as e:
-        raise PlotError(f"Garmin login failed: {e}") from e
 
     # 1. list all activities (newest first, 100 per page)
     listed: list[dict] = []
@@ -523,6 +754,9 @@ def load_garmin(sport: str, refresh: bool, force: bool, email: str | None = None
             continue
         try:
             gpx = client.download_activity(aid, dl_fmt=Garmin.ActivityDownloadFormat.GPX)
+            if TRACKS_DIR:
+                TRACKS_DIR.mkdir(parents=True, exist_ok=True)
+                (TRACKS_DIR / f"{aid}.gpx").write_bytes(gpx)
             pts = _parse_gpx(gpx)
         except Exception as e:  # noqa: BLE001
             log(f"Skipping {aid} ({a.get('activityName')}): {e}")
@@ -734,6 +968,10 @@ def main() -> None:
     src = p.add_mutually_exclusive_group()
     src.add_argument("--strava", action="store_true", help="Use the Strava API instead of Garmin Connect (default)")
     src.add_argument("--export", type=Path, help="Use a Strava data-archive zip (no API needed)")
+    src.add_argument("--files", type=Path, nargs="+", metavar="PATH", help="Use local .fit/.gpx/.tcx files or folders (e.g. GARMIN/Activity on a watch)")
+    p.add_argument("--export-fit", type=Path, metavar="DIR", help="Download the original FIT of every cached Garmin activity into DIR and exit")
+    p.add_argument("--export-gpx", type=Path, metavar="DIR", help="Write a GPX of every cached Garmin activity into DIR and exit")
+    p.add_argument("--upload", type=Path, nargs="+", metavar="FILE", help="Upload .fit/.gpx/.tcx files to Garmin Connect and exit")
     p.add_argument("--force", action="store_true", help="Check Garmin for new activities even if fetched < 3 h ago")
     p.add_argument("--refresh", action="store_true", help="Throw away the cache and re-download everything")
     p.add_argument("--sport", choices=[*SPORTS, "all"], default="run", help="Activity type to plot (default: run)")
@@ -751,8 +989,20 @@ def main() -> None:
 
 
 def run_cli(args) -> None:
+    if args.upload or args.export_fit or args.export_gpx:
+        client = garmin_login()
+        if args.upload:
+            upload_garmin(find_track_files(args.upload), client)
+        if args.export_fit:
+            export_garmin(args.export_fit, "fit", client)
+        if args.export_gpx:
+            export_garmin(args.export_gpx, "gpx", client)
+        return
+
     if args.export:
         activities = load_export(args.export)
+    elif args.files:
+        activities = load_files(args.files)
     elif args.strava:
         token = get_access_token()
         activities = load_activities(token, args.refresh)

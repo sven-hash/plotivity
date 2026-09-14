@@ -20,6 +20,19 @@ Two ways to use it: the **Run Map desktop app** (no terminal needed) or the comm
 5. **Open map** shows the map in a window; **Save map as…** exports the HTML to share or open in a
    browser.
 
+**Import, export & upload** (expand the section under the buttons):
+
+- **Import files… / Import folder…** adds `.fit`, `.gpx` or `.tcx` files to the map, e.g. copied from a
+  watch's `GARMIN/Activity` folder or exported from another app. Works without a Garmin login too.
+- **Export FIT… / Export GPX…** downloads every activity currently on the map into a folder you pick.
+  FIT is the original file recorded by the watch. Files already in the folder are skipped, so you can
+  re-run it to fetch only new ones.
+- **Upload to Garmin…** sends `.fit`/`.gpx`/`.tcx` files to Garmin Connect. Garmin rejects activities
+  it already has, so the result lists uploaded / duplicate / failed per file.
+  **Structured workouts** (interval sessions saved as workout FIT files) are detected automatically
+  and created in Garmin Connect → Training → Workouts, keeping steps, repeats and pace / heart-rate /
+  power targets. From there you can schedule them or send them to your watch.
+
 Data lives in `~/Library/Application Support/RunMap` (login session, cached activities, map).
 "Forget saved login and data" in the app removes it.
 
@@ -82,6 +95,11 @@ uv run plot_runs.py --no-heatmap       # routes only, light basemap, smaller fil
 uv run plot_runs.py --open             # open the map in your browser when done
 uv run plot_runs.py --weight 3 --opacity 0.3   # route line style in normal mode
 uv run plot_runs.py -o mymap.html
+
+uv run plot_runs.py --files ~/watch/GARMIN/Activity   # map from local .fit/.gpx/.tcx files, no Garmin login
+uv run plot_runs.py --export-fit ~/Desktop/fit        # download original FIT of every cached activity
+uv run plot_runs.py --export-gpx ~/Desktop/gpx        # same as GPX
+uv run plot_runs.py --upload run1.fit run2.gpx        # upload activities (or workout FIT files) to Garmin Connect
 ```
 
 **Fetch throttling:** the script remembers when it last talked to Garmin (in `garmin_cache.json`).

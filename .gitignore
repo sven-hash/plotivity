@@ -22,3 +22,8 @@ packaging/icon_1024.png
 
 # app UI is source, not generated output
 !ui.html
+
+# personal activity/workout files dropped in the repo for testing
+*.fit
+*.gpx
+*.tcx
